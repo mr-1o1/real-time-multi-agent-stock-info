@@ -40,7 +40,7 @@ This README will guide you through setting up and running the project on your lo
 ## Project Structure
 Here's how the project is organized:
 ```
-stock_chatbot/
+real-time-multi-agent-stock-info/
 ├── api/
 │   └── main.py              # FastAPI backend to fetch stock data and sentiment
 ├── data/
@@ -76,8 +76,8 @@ Follow these steps to set up the project on your local system. Each step is expl
 Clone this repository to your local machine using Git.
 
 ```bash
-git clone https://github.com/your-username/stock_chatbot.git
-cd stock_chatbot
+git https://github.com/mr-1o1/real-time-multi-agent-stock-info.git
+cd real-time-multi-agent-stock-info
 ```
 
 Replace `your-username` with your GitHub username or the correct repository URL.
