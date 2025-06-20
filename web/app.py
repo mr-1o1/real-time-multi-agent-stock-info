@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import re
 import os
+import json
 from dotenv import load_dotenv
 from huggingface_hub import InferenceClient
 import logging
@@ -28,13 +29,29 @@ if not HUGGINGFACE_API_TOKEN:
     st.stop()
 client = InferenceClient(token=HUGGINGFACE_API_TOKEN)
 
+# Load NASDAQ symbols and company names
+SYMBOLS_FILE = "data/nasdaq_symbols.json"
+try:
+    with open(SYMBOLS_FILE, "r") as f:
+        nasdaq_data = json.load(f)
+        NASDAQ_SYMBOLS = {item["symbol"]: item["company_name"] for item in nasdaq_data}
+    logger.info(f"Loaded {len(NASDAQ_SYMBOLS)} NASDAQ symbols from {SYMBOLS_FILE}")
+except FileNotFoundError:
+    logger.error(f"Symbols file {SYMBOLS_FILE} not found")
+    st.error("NASDAQ symbols file not found. Please run scripts/generate_symbols.py.")
+    st.stop()
+except Exception as e:
+    logger.error(f"Failed to load symbols: {str(e)}")
+    st.error("Error loading NASDAQ symbols. Contact support.")
+    st.stop()
+
 # Streamlit chat UI
 st.title("Stock Chatbot")
 
 # Initialize chat history
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "Hi! I'm your Stock Chatbot. Ask me about a stock (e.g., 'What's the price of TSLA?' or 'Is IBM a good buy?')."}
+        {"role": "assistant", "content": "Hi! I'm your Stock Chatbot. Ask me about any NASDAQ stock (e.g., 'Price of AAPL' or 'Is TSLA a good buy?')."}
     ]
 
 # Display chat history
@@ -54,11 +71,11 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
     logger.debug(f"Processing query: {prompt}")
 
     # Common words to exclude
-    COMMON_WORDS = {"WHAT", "IS", "THE", "PRICE", "OF", "FOR", "IN", "A", "AN", "AND"}
+    COMMON_WORDS = {"WHAT", "IS", "THE", "PRICE", "OF", "FOR", "IN", "A", "AN", "AND", "GIVE", "ME", "LATEST", "STOCK", "VALUE"}
 
-    # Parse query using regex
+    # Parse query using regex for symbol
     logger.debug("Attempting regex-based symbol extraction")
-    symbol_match = re.search(r'\b(?:of|for)\s+([A-Z]{1,5})\b', prompt.upper())
+    symbol_match = re.search(r'\b(?:of|for|price|value)\s+([A-Z]{1,5})\b', prompt.upper())
     if not symbol_match:
         words = re.findall(r'\b[A-Z]{1,5}\b', prompt.upper())
         symbol_candidates = [w for w in words if w not in COMMON_WORDS]
@@ -83,45 +100,72 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
             logger.debug(f"LLM extracted symbol: {symbol}")
         except Exception as e:
             logger.error(f"LLM symbol extraction failed: {str(e)}")
-            response = "Unable to extract a stock symbol. Please include a valid symbol (e.g., AAPL)."
+            response = "Unable to extract a stock symbol. Please include a valid NASDAQ symbol (e.g., AAPL)."
             symbol = None
-    
-    # Parse intent using LLM
-    intent = "invalid"
+
+    # Validate symbol and get company name
+    company_name = None
     if symbol:
-        logger.debug(f"Attempting LLM intent parsing for symbol: {symbol}")
-        try:
-            intent_response = client.text_generation(
-                prompt=f"Classify the intent of this query: '{prompt}'. Possible intents: 'price', 'financials', 'sentiment', 'analysis', 'invalid'. Return only the intent.",
-                model="mistralai/Mixtral-8x7B-Instruct-v0.1",
-                max_new_tokens=10
-            )
-            # Clean intent by removing quotes, whitespace, and extra characters
-            raw_intent = intent_response
-            intent = raw_intent.strip().replace("'", "").replace("\"", "").strip()
-            logger.debug(f"Raw LLM intent: {raw_intent}, Cleaned intent: {intent}, symbol: {symbol}")
-        except Exception as e:
-            logger.error(f"LLM intent parsing failed: {str(e)}")
-            response = "Unable to identify your request. Please try again."
+        if symbol in NASDAQ_SYMBOLS:
+            company_name = NASDAQ_SYMBOLS[symbol]
+            logger.debug(f"Valid NASDAQ symbol: {symbol}, company name: {company_name}")
+        else:
+            response = f"'{symbol}' is not a valid NASDAQ stock symbol. Please try a NASDAQ-listed stock (e.g., AAPL, TSLA)."
+            logger.info(f"Invalid NASDAQ symbol: {symbol}")
+            symbol = None
+
+    # Parse intent using regex patterns first
+    intent = None
+    price_patterns = [
+        r'\bprice\b', r'\bstock\s*value\b', r'\blow\s*much\s*is\b', 
+        r'\bcurrent\s*price\b', r'\blatest\s*price\b', r'\bgive\s*me\s*\w*\s*price\b'
+    ]
+    if symbol:
+        query_lower = prompt.lower()
+        if any(re.search(pattern, query_lower) for pattern in price_patterns):
+            intent = "price"
+            logger.debug(f"Regex-based intent detected: {intent}, symbol: {symbol}")
+        
+        # Fallback to LLM for other intents
+        if intent is None:
+            logger.debug(f"Attempting LLM intent parsing for symbol: {symbol}")
+            try:
+                intent_response = client.text_generation(
+                    prompt=f"Classify the intent of this query: '{prompt}'. Possible intents: 'price', 'financials', 'sentiment', 'analysis', 'invalid'. Return only the intent.",
+                    model="mistralai/Mixtral-8x7B-Instruct-v0.1",
+                    max_new_tokens=10
+                )
+                raw_intent = intent_response
+                # Clean intent: take first word or line, remove quotes and extra text
+                intent = raw_intent.split()[0].strip().replace("'", "").replace("\"", "").strip()
+                logger.debug(f"Raw LLM intent: {raw_intent!r}, Cleaned intent: {intent}, symbol: {symbol}")
+            except Exception as e:
+                logger.error(f"LLM intent parsing failed: {str(e)}")
+                intent = "invalid"
+                response = "Unable to identify your request. Please try again."
 
     # Process query
     with st.chat_message("assistant"):
         if not symbol:
-            response = "Please include a valid stock symbol (e.g., TSLA, AAPL)."
+            response = "Please include a valid NASDAQ stock symbol (e.g., TSLA, AAPL)."
             logger.info(f"No symbol extracted for query: {prompt}")
         elif intent == "invalid":
             response = "Sorry, I didn't understand your request. Try asking about a stock's price, financials, sentiment, or overall analysis."
             logger.info(f"Invalid intent for query: {prompt}")
         else:
             try:
-                # Fetch data from FastAPI
-                logger.debug(f"Sending API request for {symbol}")
-                api_response = requests.get(f"http://localhost:8000/stock/{symbol}", timeout=10)
+                # Fetch data from FastAPI with company name
+                logger.debug(f"Sending API request for {symbol}, company_name: {company_name}")
+                api_response = requests.get(
+                    f"http://localhost:8000/stock/{symbol}",
+                    params={"companyName": company_name},
+                    timeout=10
+                )
                 api_response.raise_for_status()
                 data = api_response.json()
                 logger.debug(f"API response: {data}")
 
-                # Validate response structure
+                # Validate response
                 required_fields = {"price", "financials", "sentiment", "status"}
                 if not all(key in data for key in required_fields) or data["status"] != "complete":
                     logger.error(f"Invalid API response for {symbol}: {data}")
@@ -170,5 +214,3 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
         logger.debug(f"Final response: {response}")
         st.markdown(response)
         st.session_state.messages.append({"role": "assistant", "content": response})
-
-
