@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from huggingface_hub import InferenceClient
 import logging
 
-# Configure logging with file output
+# Set up logging to both file and console for debugging
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -18,18 +18,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
+# Load environment variables from .env file
 load_dotenv()
 HUGGINGFACE_API_TOKEN = os.getenv("HUGGINGFACE_API_TOKEN")
 
-# Initialize Hugging Face client
+# Initialize the Hugging Face client for AI responses
 if not HUGGINGFACE_API_TOKEN:
     logger.error("Hugging Face API token not found in .env")
     st.error("Hugging Face API token not found in .env")
     st.stop()
 client = InferenceClient(token=HUGGINGFACE_API_TOKEN)
 
-# Load NASDAQ symbols and company names
+# Load NASDAQ stock symbols and company names from JSON file
 SYMBOLS_FILE = "data/nasdaq_symbols.json"
 try:
     with open(SYMBOLS_FILE, "r") as f:
@@ -45,38 +45,39 @@ except Exception as e:
     st.error("Error loading NASDAQ symbols. Contact support.")
     st.stop()
 
-# Streamlit chat UI
+# Set up the main chat interface
 st.title("Stock Chatbot")
 
-# Initialize chat history
+# Initialize chat history with a welcome message
 if "messages" not in st.session_state:
     st.session_state.messages = [
         {"role": "assistant", "content": "Hi! I'm your Stock Chatbot. Ask me about any NASDAQ stock, like 'What's the price of AAPL?' or 'Is TSLA a good buy?'."}
     ]
 
-# Display chat history
+# Display all previous chat messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Chat input
+# Handle new user input
 if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
-    # Add user message
+    # Add user message to chat history
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Initialize response
+    # Set default error response
     response = "Sorry, something went wrong. Please try again."
     logger.debug(f"Processing query: {prompt}")
 
-    # Common words to exclude
+    # Define common words to filter out when looking for stock symbols
     COMMON_WORDS = {"WHAT", "IS", "THE", "PRICE", "OF", "FOR", "IN", "A", "AN", "AND", "GIVE", "ME", "LATEST", "STOCK", "VALUE"}
 
-    # Parse query using regex for symbol
+    # Try to extract stock symbol using regex patterns first
     logger.debug("Attempting regex-based symbol extraction")
     symbol_match = re.search(r'\b(?:of|for|price|value)\s+([A-Z]{1,5})\b', prompt.upper())
     if not symbol_match:
+        # Fallback: look for any 1-5 letter uppercase words that aren't common words
         words = re.findall(r'\b[A-Z]{1,5}\b', prompt.upper())
         symbol_candidates = [w for w in words if w not in COMMON_WORDS]
         symbol = symbol_candidates[0] if symbol_candidates else None
@@ -85,7 +86,7 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
         symbol = symbol_match.group(1)
         logger.debug(f"Regex extracted symbol: {symbol}")
 
-    # Fallback to LLM for symbol extraction
+    # If regex fails, use AI to extract the stock symbol
     if not symbol or symbol in COMMON_WORDS:
         logger.debug("Falling back to LLM for symbol extraction")
         try:
@@ -103,7 +104,7 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
             response = "I couldn't find a valid stock symbol in your query. Please include a NASDAQ symbol like AAPL or TSLA."
             symbol = None
 
-    # Validate symbol and get company name
+    # Check if the extracted symbol is valid and get the company name
     company_name = None
     if symbol:
         if symbol in NASDAQ_SYMBOLS:
@@ -114,8 +115,9 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
             logger.info(f"Invalid NASDAQ symbol: {symbol}")
             symbol = None
 
-    # Parse intent using regex patterns first
+    # Figure out what the user wants to know about the stock
     intent = None
+    # Define regex patterns for different types of requests
     price_patterns = [
         r'\bprice\b', r'\bstock\s*value\b', r'\blow\s*much\s*is\b', 
         r'\bcurrent\s*price\b', r'\blatest\s*price\b', r'\bgive\s*me\s*\w*\s*price\b'
@@ -126,6 +128,7 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
     
     if symbol:
         query_lower = prompt.lower()
+        # Check which type of request this is using regex patterns
         if any(re.search(pattern, query_lower) for pattern in price_patterns):
             intent = "price"
             logger.debug(f"Regex-based intent detected: {intent}, symbol: {symbol}")
@@ -139,7 +142,7 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
             intent = "analysis"
             logger.debug(f"Regex-based intent detected: {intent}, symbol: {symbol}")
         
-        # Fallback to LLM for other intents
+        # If regex patterns don't match, use AI to figure out the intent
         if intent is None:
             logger.debug(f"Attempting LLM intent parsing for symbol: {symbol}")
             try:
@@ -149,11 +152,11 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
                     max_new_tokens=10
                 )
                 raw_intent = intent_response
-                # Clean intent: try first word, then search for valid intents
+                # Clean up the AI response to get a valid intent
                 intent = raw_intent.split()[0].strip().replace("'", "").replace("\"", "").strip()
                 valid_intents = ["price", "financials", "sentiment", "analysis", "invalid"]
                 if intent not in valid_intents:
-                    # Search raw_intent for valid intent keywords
+                    # Search the raw response for valid intent keywords
                     raw_lower = raw_intent.lower()
                     for valid_intent in valid_intents:
                         if valid_intent in raw_lower:
@@ -167,7 +170,7 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
                 intent = "invalid"
                 response = "I couldn't understand your request. Please ask about a stock's price, financials, sentiment, or overall analysis."
 
-    # Process query
+    # Generate the response based on the extracted symbol and intent
     with st.chat_message("assistant"):
         if not symbol:
             response = response  # Use error response from symbol extraction
@@ -177,7 +180,7 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
             logger.info(f"Invalid intent for query: {prompt}")
         else:
             try:
-                # Fetch data from FastAPI with company name
+                # Get stock data from our FastAPI backend
                 logger.debug(f"Sending API request for {symbol}, company_name: {company_name}")
                 api_response = requests.get(
                     f"http://localhost:8000/stock/{symbol}",
@@ -188,15 +191,16 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
                 data = api_response.json()
                 logger.debug(f"API response: {data}")
 
-                # Validate response
+                # Make sure we got all the data we need
                 required_fields = {"price", "financials", "sentiment", "status"}
                 if not all(key in data for key in required_fields) or data["status"] != "complete":
                     logger.error(f"Invalid API response for {symbol}: {data}")
                     response = f"I received incomplete data for {symbol}. Please try again."
                 else:
-                    # Generate conversational response using LLM
+                    # Use AI to create natural, conversational responses
                     try:
                         if intent == "price":
+                            # Generate a friendly response about the stock price
                             llm_prompt = (
                                 f"You are a financial assistant. Create a concise, conversational response for {company_name} ({symbol}) using this data:\n"
                                 f"- Current price: ${data['price']:.2f}\n"
@@ -209,6 +213,7 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
                             ).strip()
                             response = humanized_response
                         elif intent == "financials":
+                            # Generate a response about financial metrics
                             llm_prompt = (
                                 f"You are a financial assistant. Create a conversational response for {company_name} ({symbol}) using this data:\n"
                                 f"- Market Cap: ${int(data['financials']['market_cap']):,}\n"
@@ -223,6 +228,7 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
                             ).strip()
                             response = humanized_response
                         elif intent == "sentiment":
+                            # Generate a response about market sentiment and news
                             llm_prompt = (
                                 f"You are a financial assistant. Create a conversational response for {company_name} ({symbol}) using this data:\n"
                                 f"- Sentiment: {data['sentiment']['summary']}\n"
@@ -240,6 +246,7 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
                             ).strip()
                             response = humanized_response
                         elif intent == "analysis":
+                            # Generate a comprehensive analysis response
                             llm_prompt = (
                                 f"You are a financial assistant. Create a conversational analysis for {company_name} ({symbol}) using this data:\n"
                                 f"- Current price: ${data['price']:.2f}\n"
@@ -263,7 +270,7 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
                         logger.debug(f"Humanized LLM response: {response}")
                     except Exception as e:
                         logger.error(f"LLM humanized response failed: {str(e)}")
-                        # Fallback to structured response
+                        # Fallback to structured response if AI fails
                         if intent == "price":
                             response = f"The current price of {symbol} is ${data['price']:.2f}."
                         elif intent == "financials":
@@ -302,7 +309,7 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
                 logger.error(f"API call or processing failed for {symbol}: {str(e)}")
                 response = f"I couldn't fetch data for {symbol} due to an error: {str(e)}."
 
-        # Display and store response
+        # Show the response and save it to chat history
         logger.debug(f"Final response: {response}")
         st.markdown(response)
         st.session_state.messages.append({"role": "assistant", "content": response})
