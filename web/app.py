@@ -71,38 +71,113 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
     logger.debug(f"Processing query: {prompt}")
 
     # Define common words to filter out when looking for stock symbols
-    COMMON_WORDS = {"WHAT", "IS", "THE", "PRICE", "OF", "FOR", "IN", "A", "AN", "AND", "GIVE", "ME", "LATEST", "STOCK", "VALUE"}
+    COMMON_WORDS = {"WHAT", "IS", "THE", "PRICE", "OF", "FOR", "IN", "A", "AN", "AND", "GIVE", "ME", "LATEST", "STOCK", "VALUE", "LATEST"}
 
-    # Try to extract stock symbol using regex patterns first
-    logger.debug("Attempting regex-based symbol extraction")
-    symbol_match = re.search(r'\b(?:of|for|price|value)\s+([A-Z]{1,5})\b', prompt.upper())
-    if not symbol_match:
-        # Fallback: look for any 1-5 letter uppercase words that aren't common words
-        words = re.findall(r'\b[A-Z]{1,5}\b', prompt.upper())
-        symbol_candidates = [w for w in words if w not in COMMON_WORDS]
-        symbol = symbol_candidates[0] if symbol_candidates else None
-        logger.debug(f"Regex fallback candidates: {symbol_candidates}, selected: {symbol}")
-    else:
-        symbol = symbol_match.group(1)
-        logger.debug(f"Regex extracted symbol: {symbol}")
+    # Primary approach: Use AI to extract stock symbol and intent together
+    logger.debug("Using AI for symbol and intent extraction")
+    try:
+        # Create a comprehensive prompt for the AI to extract both symbol and intent
+        llm_prompt = f"""
+Extract the stock symbol and intent from this query: "{prompt}"
 
-    # If regex fails, use AI to extract the stock symbol
-    if not symbol or symbol in COMMON_WORDS:
-        logger.debug("Falling back to LLM for symbol extraction")
-        try:
-            llm_symbol_response = client.text_generation(
-                prompt=f"Extract the stock symbol from this query: '{prompt}'. Return only the symbol (e.g., AAPL) or 'None' if none found.",
-                model="mistralai/Mixtral-8x7B-Instruct-v0.1",
-                max_new_tokens=10
-            )
-            symbol = llm_symbol_response.strip()
-            if symbol == "None":
-                symbol = None
-            logger.debug(f"LLM extracted symbol: {symbol}")
-        except Exception as e:
-            logger.error(f"LLM symbol extraction failed: {str(e)}")
-            response = "I couldn't find a valid stock symbol in your query. Please include a NASDAQ symbol like AAPL or TSLA."
-            symbol = None
+Return your response in this exact format:
+SYMBOL: [stock_symbol] (e.g., AAPL, GOOG, TSLA) or None if no symbol found
+INTENT: [intent] (one of: price, financials, sentiment, analysis, invalid)
+
+Examples:
+- "What's the price of AAPL?" → SYMBOL: AAPL, INTENT: price
+- "Show me GOOG financials" → SYMBOL: GOOG, INTENT: financials
+- "Is TSLA a good buy?" → SYMBOL: TSLA, INTENT: analysis
+- "What's the weather?" → SYMBOL: None, INTENT: invalid
+
+Query: "{prompt}"
+Response:"""
+
+        llm_response = client.text_generation(
+            prompt=llm_prompt,
+            model="mistralai/Mixtral-8x7B-Instruct-v0.1",
+            max_new_tokens=50,
+            temperature=0.1
+        ).strip()
+        
+        logger.debug(f"Raw LLM response: {llm_response}")
+        
+        # Parse the AI response
+        symbol = None
+        intent = None
+        
+        # Extract symbol
+        symbol_match = re.search(r'SYMBOL:\s*([A-Z]{1,5}|None)', llm_response, re.IGNORECASE)
+        if symbol_match:
+            extracted_symbol = symbol_match.group(1).upper()
+            if extracted_symbol != "NONE":
+                symbol = extracted_symbol
+                logger.debug(f"AI extracted symbol: {symbol}")
+        
+        # Extract intent
+        intent_match = re.search(r'INTENT:\s*(price|financials|sentiment|analysis|invalid)', llm_response, re.IGNORECASE)
+        if intent_match:
+            intent = intent_match.group(1).lower()
+            logger.debug(f"AI extracted intent: {intent}")
+        
+        # If AI parsing failed, fall back to regex
+        if not symbol or not intent:
+            logger.debug("AI parsing failed, falling back to regex")
+            raise Exception("AI parsing incomplete")
+            
+    except Exception as e:
+        logger.error(f"AI extraction failed: {str(e)}")
+        
+        # Fallback: Improved regex-based extraction
+        logger.debug("Using improved regex fallback")
+        
+        # Better regex patterns for symbol extraction
+        symbol_patterns = [
+            r'\b(?:of|for|price|value|stock)\s+([A-Z]{1,5})\b',
+            r'\b([A-Z]{1,5})\s+(?:price|stock|financials|analysis)\b',
+            r'\b([A-Z]{1,5})\b(?=\s+(?:is|are|has|have|shows?|display))',
+        ]
+        
+        symbol = None
+        for pattern in symbol_patterns:
+            match = re.search(pattern, prompt.upper())
+            if match:
+                candidate = match.group(1)
+                if candidate not in COMMON_WORDS:
+                    symbol = candidate
+                    logger.debug(f"Regex extracted symbol: {symbol}")
+                    break
+        
+        # If still no symbol, look for any 1-5 letter uppercase words that aren't common
+        if not symbol:
+            words = re.findall(r'\b[A-Z]{1,5}\b', prompt.upper())
+            symbol_candidates = [w for w in words if w not in COMMON_WORDS]
+            if symbol_candidates:
+                symbol = symbol_candidates[0]
+                logger.debug(f"Regex fallback extracted symbol: {symbol}")
+        
+        # Intent detection with improved patterns
+        query_lower = prompt.lower()
+        price_patterns = [
+            r'\bprice\b', r'\bstock\s*value\b', r'\bhow\s*much\s*is\b', 
+            r'\bcurrent\s*price\b', r'\blatest\s*price\b', r'\bgive\s*me\s*\w*\s*price\b'
+        ]
+        financials_patterns = [r'\bfinancials?\b', r'\bmarket\s*cap\b', r'\brevenue\b', r'\bearnings\b']
+        sentiment_patterns = [r'\bsentiment\b', r'\bnews\b', r'\bmarket\s*mood\b']
+        analysis_patterns = [r'\banalysis\b', r'\bmarket\s*analysis\b', r'\bgood\s*(buy|investment)\b', r'\bis\s*\w*\s*a\s*good\b']
+        
+        if any(re.search(pattern, query_lower) for pattern in price_patterns):
+            intent = "price"
+        elif any(re.search(pattern, query_lower) for pattern in financials_patterns):
+            intent = "financials"
+        elif any(re.search(pattern, query_lower) for pattern in sentiment_patterns):
+            intent = "sentiment"
+        elif any(re.search(pattern, query_lower) for pattern in analysis_patterns):
+            intent = "analysis"
+        else:
+            intent = "invalid"
+        
+        logger.debug(f"Regex fallback - symbol: {symbol}, intent: {intent}")
 
     # Check if the extracted symbol is valid and get the company name
     company_name = None
@@ -115,68 +190,13 @@ if prompt := st.chat_input("Type your question (e.g., 'Price of AAPL')"):
             logger.info(f"Invalid NASDAQ symbol: {symbol}")
             symbol = None
 
-    # Figure out what the user wants to know about the stock
-    intent = None
-    # Define regex patterns for different types of requests
-    price_patterns = [
-        r'\bprice\b', r'\bstock\s*value\b', r'\blow\s*much\s*is\b', 
-        r'\bcurrent\s*price\b', r'\blatest\s*price\b', r'\bgive\s*me\s*\w*\s*price\b'
-    ]
-    financials_patterns = [r'\bfinancials?\b', r'\bmarket\s*cap\b', r'\brevenue\b', r'\bearnings\b']
-    sentiment_patterns = [r'\bsentiment\b', r'\bnews\b', r'\bmarket\s*mood\b']
-    analysis_patterns = [r'\banalysis\b', r'\bmarket\s*analysis\b', r'\bgood\s*(buy|investment)\b']
-    
-    if symbol:
-        query_lower = prompt.lower()
-        # Check which type of request this is using regex patterns
-        if any(re.search(pattern, query_lower) for pattern in price_patterns):
-            intent = "price"
-            logger.debug(f"Regex-based intent detected: {intent}, symbol: {symbol}")
-        elif any(re.search(pattern, query_lower) for pattern in financials_patterns):
-            intent = "financials"
-            logger.debug(f"Regex-based intent detected: {intent}, symbol: {symbol}")
-        elif any(re.search(pattern, query_lower) for pattern in sentiment_patterns):
-            intent = "sentiment"
-            logger.debug(f"Regex-based intent detected: {intent}, symbol: {symbol}")
-        elif any(re.search(pattern, query_lower) for pattern in analysis_patterns):
-            intent = "analysis"
-            logger.debug(f"Regex-based intent detected: {intent}, symbol: {symbol}")
-        
-        # If regex patterns don't match, use AI to figure out the intent
-        if intent is None:
-            logger.debug(f"Attempting LLM intent parsing for symbol: {symbol}")
-            try:
-                intent_response = client.text_generation(
-                    prompt=f"Classify the intent of this query: '{prompt}'. Possible intents: 'price', 'financials', 'sentiment', 'analysis', 'invalid'. Return only the intent.",
-                    model="mistralai/Mixtral-8x7B-Instruct-v0.1",
-                    max_new_tokens=10
-                )
-                raw_intent = intent_response
-                # Clean up the AI response to get a valid intent
-                intent = raw_intent.split()[0].strip().replace("'", "").replace("\"", "").strip()
-                valid_intents = ["price", "financials", "sentiment", "analysis", "invalid"]
-                if intent not in valid_intents:
-                    # Search the raw response for valid intent keywords
-                    raw_lower = raw_intent.lower()
-                    for valid_intent in valid_intents:
-                        if valid_intent in raw_lower:
-                            intent = valid_intent
-                            break
-                    else:
-                        intent = "invalid"
-                logger.debug(f"Raw LLM intent: {raw_intent!r}, Cleaned intent: {intent}, symbol: {symbol}")
-            except Exception as e:
-                logger.error(f"LLM intent parsing failed: {str(e)}")
-                intent = "invalid"
-                response = "I couldn't understand your request. Please ask about a stock's price, financials, sentiment, or overall analysis."
-
     # Generate the response based on the extracted symbol and intent
     with st.chat_message("assistant"):
         if not symbol:
-            response = response  # Use error response from symbol extraction
-            logger.info(f"No symbol extracted for query: {prompt}")
+            response = "I couldn't find a valid stock symbol in your query. Please include a NASDAQ symbol like AAPL, GOOG, or TSLA."
+            logger.info(f"No valid symbol extracted for query: {prompt}")
         elif intent == "invalid":
-            response = response  # Use error response from intent parsing
+            response = "I couldn't understand your request. Please ask about a stock's price, financials, sentiment, or overall analysis."
             logger.info(f"Invalid intent for query: {prompt}")
         else:
             try:
